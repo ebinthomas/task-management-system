@@ -190,7 +190,7 @@ Response:
 docker-compose up -d --build
 ```
 
-2. ### Running the Service
+<!-- 2. ### Running the Service
 
 1. Clone the repository:
    ```bash
@@ -210,7 +210,7 @@ docker-compose up -d --build
 4. Run the service:
    ```bash
    go run cmd/api/main.go
-   ```
+   ``` -->
 
 
 
