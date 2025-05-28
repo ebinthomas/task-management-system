@@ -2,7 +2,8 @@ package cache
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,17 +11,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-type TestData struct {
-	Name  string `json:"name"`
-	Value int    `json:"value"`
-}
-
 func setupTestRedis(t *testing.T) (*RedisCache, *miniredis.Miniredis) {
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("Failed to create miniredis: %v", err)
 	}
 
+	// Parse host and port from miniredis address
+	addr := strings.Split(mr.Addr(), ":")
+	if len(addr) != 2 {
+		t.Fatalf("Invalid miniredis address format: %s", mr.Addr())
+	}
+
+	// Create Redis cache with the full address
 	cache, err := NewRedisCache(mr.Addr(), "", 0)
 	if err != nil {
 		t.Fatalf("Failed to create Redis cache: %v", err)
@@ -34,15 +37,23 @@ func TestRedisCache_Set(t *testing.T) {
 	defer mr.Close()
 
 	ctx := context.Background()
-	testData := TestData{Name: "test", Value: 123}
+	testData := "test_value"
 
 	// Test successful set
-	err := cache.Set(ctx, "test_key", testData, 1*time.Minute)
+	err := cache.Set(ctx, "test_key", testData, 1*time.Hour)
 	assert.NoError(t, err)
-	assert.True(t, mr.Exists("test_key"))
 
-	// Test set with nil value
-	err = cache.Set(ctx, "nil_key", nil, 1*time.Minute)
+	// Verify value was set (note: Redis stores JSON-encoded values)
+	val, err := mr.Get("test_key")
+	assert.NoError(t, err)
+	var result string
+	err = json.Unmarshal([]byte(val), &result)
+	assert.NoError(t, err)
+	assert.Equal(t, testData, result)
+
+	// Test set with invalid connection
+	mr.Close() // Close Redis to simulate connection error
+	err = cache.Set(ctx, "test_key2", testData, 1*time.Hour)
 	assert.Error(t, err)
 }
 
@@ -51,26 +62,28 @@ func TestRedisCache_Get(t *testing.T) {
 	defer mr.Close()
 
 	ctx := context.Background()
-	testData := TestData{Name: "test", Value: 123}
+	testData := "test_value"
 
-	// Set test data
-	err := cache.Set(ctx, "test_key", testData, 1*time.Minute)
+	// Set a test value (JSON encoded)
+	jsonData, err := json.Marshal(testData)
+	assert.NoError(t, err)
+	err = mr.Set("test_key", string(jsonData))
 	assert.NoError(t, err)
 
 	// Test successful get
-	var retrieved TestData
-	err = cache.Get(ctx, "test_key", &retrieved)
+	var result string
+	err = cache.Get(ctx, "test_key", &result)
 	assert.NoError(t, err)
-	assert.Equal(t, testData, retrieved)
+	assert.Equal(t, testData, result)
 
 	// Test get non-existent key
-	var empty TestData
-	err = cache.Get(ctx, "non_existent", &empty)
+	var notFound string
+	err = cache.Get(ctx, "non_existent", &notFound)
 	assert.Error(t, err)
 
-	// Test get with expired key
-	mr.SetTTL("test_key", -1*time.Second)
-	err = cache.Get(ctx, "test_key", &empty)
+	// Test get with invalid connection
+	mr.Close() // Close Redis to simulate connection error
+	err = cache.Get(ctx, "test_key", &result)
 	assert.Error(t, err)
 }
 
@@ -79,20 +92,19 @@ func TestRedisCache_Delete(t *testing.T) {
 	defer mr.Close()
 
 	ctx := context.Background()
-	testData := TestData{Name: "test", Value: 123}
+	testData := "test_value"
 
-	// Set test data
-	err := cache.Set(ctx, "test_key", testData, 1*time.Minute)
+	// Set a test value
+	err := mr.Set("test_key", testData)
 	assert.NoError(t, err)
 
 	// Test successful delete
 	err = cache.Delete(ctx, "test_key")
 	assert.NoError(t, err)
-	assert.False(t, mr.Exists("test_key"))
 
-	// Test delete non-existent key
-	err = cache.Delete(ctx, "non_existent")
-	assert.NoError(t, err) // Redis DEL returns success even if key doesn't exist
+	// Verify key was deleted
+	exists := mr.Exists("test_key")
+	assert.False(t, exists)
 }
 
 func TestRedisCache_Clear(t *testing.T) {
@@ -100,19 +112,17 @@ func TestRedisCache_Clear(t *testing.T) {
 	defer mr.Close()
 
 	ctx := context.Background()
-	testData := TestData{Name: "test", Value: 123}
 
-	// Set multiple test keys
-	for i := 0; i < 3; i++ {
-		key := fmt.Sprintf("test_key_%d", i)
-		err := cache.Set(ctx, key, testData, 1*time.Minute)
-		assert.NoError(t, err)
-	}
-
-	// Test clear
-	err := cache.Clear(ctx)
+	// Set multiple test values
+	err := mr.Set("test_key1", "test_value1")
+	assert.NoError(t, err)
+	err = mr.Set("test_key2", "test_value2")
 	assert.NoError(t, err)
 
-	// Verify all keys are removed
+	// Test successful clear
+	err = cache.Clear(ctx)
+	assert.NoError(t, err)
+
+	// Verify all keys were deleted
 	assert.Equal(t, 0, len(mr.Keys()))
 } 

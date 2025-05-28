@@ -3,6 +3,7 @@ package monitoring
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
@@ -109,10 +110,16 @@ func (c *CloudWatchAlarmService) GetAlarmState(ctx context.Context, alarmName st
 	case "OK":
 		return AlarmStateOK, nil
 	case "ALARM":
-		return AlarmStateAlert, nil
+		return AlarmStateALARM, nil
 	default:
 		return AlarmStateUnknown, nil
 	}
+}
+
+// IsAlarmsEnabled implements AlarmService.IsAlarmsEnabled
+func (c *CloudWatchAlarmService) IsAlarmsEnabled() bool {
+	// Check if alarms are enabled via environment variable
+	return os.Getenv("ENABLE_ALARMS") == "true"
 }
 
 // convertComparisonOperator converts our generic operator to CloudWatch's type

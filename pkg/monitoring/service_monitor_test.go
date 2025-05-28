@@ -2,33 +2,59 @@ package monitoring
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
-// MockCloudWatchClient is a mock implementation of CloudWatch client
+// MockCloudWatchClient is a mock implementation of CloudWatchClient
 type MockCloudWatchClient struct {
 	mock.Mock
 }
 
 func (m *MockCloudWatchClient) PutMetricData(ctx context.Context, params *cloudwatch.PutMetricDataInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.PutMetricDataOutput, error) {
 	args := m.Called(ctx, params)
-	return &cloudwatch.PutMetricDataOutput{}, args.Error(1)
+	return args.Get(0).(*cloudwatch.PutMetricDataOutput), args.Error(1)
 }
 
-func (m *MockCloudWatchClient) PutMetricAlarm(ctx context.Context, params *cloudwatch.PutMetricAlarmInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.PutMetricAlarmOutput, error) {
-	args := m.Called(ctx, params)
-	return &cloudwatch.PutMetricAlarmOutput{}, args.Error(1)
+// MockAlarmService is a mock implementation of AlarmService
+type MockAlarmService struct {
+	mock.Mock
+}
+
+func (m *MockAlarmService) CreateAlarm(ctx context.Context, alarm Alarm) error {
+	args := m.Called(ctx, alarm)
+	return args.Error(0)
+}
+
+func (m *MockAlarmService) UpdateAlarm(ctx context.Context, alarm Alarm) error {
+	args := m.Called(ctx, alarm)
+	return args.Error(0)
+}
+
+func (m *MockAlarmService) DeleteAlarm(ctx context.Context, alarmName string) error {
+	args := m.Called(ctx, alarmName)
+	return args.Error(0)
+}
+
+func (m *MockAlarmService) GetAlarmState(ctx context.Context, alarmName string) (AlarmState, error) {
+	args := m.Called(ctx, alarmName)
+	return args.Get(0).(AlarmState), args.Error(1)
+}
+
+func (m *MockAlarmService) IsAlarmsEnabled() bool {
+	args := m.Called()
+	return args.Bool(0)
 }
 
 func TestServiceMonitor_UpdateServiceState(t *testing.T) {
-	mockClient := new(MockCloudWatchClient)
-	monitor := NewServiceMonitor(mockClient, "TestNamespace", time.Minute)
+	mockClient := &MockCloudWatchClient{}
+	mockAlarmService := &MockAlarmService{}
+	monitor := NewServiceMonitor(mockClient, mockAlarmService, "TestNamespace", time.Minute)
 
 	state := ServiceState{
 		Name:      "TestService",
@@ -41,10 +67,17 @@ func TestServiceMonitor_UpdateServiceState(t *testing.T) {
 		},
 	}
 
-	// Expect PutMetricData calls
+	// Set environment variable for metrics
+	os.Setenv("ENABLE_METRICS", "true")
+	defer os.Unsetenv("ENABLE_METRICS")
+
+	// Expect PutMetricData calls for status and each metric
 	mockClient.On("PutMetricData", mock.Anything, mock.MatchedBy(func(input *cloudwatch.PutMetricDataInput) bool {
 		return *input.Namespace == "TestNamespace"
-	})).Return(&cloudwatch.PutMetricDataOutput{}, nil)
+	})).Return(&cloudwatch.PutMetricDataOutput{}, nil).Times(3) // Once for status, twice for metrics
+
+	// We don't actually need IsAlarmsEnabled for UpdateServiceState
+	mockAlarmService.On("IsAlarmsEnabled").Return(true).Maybe()
 
 	err := monitor.UpdateServiceState(state)
 	assert.NoError(t, err)
@@ -56,25 +89,32 @@ func TestServiceMonitor_UpdateServiceState(t *testing.T) {
 	assert.Equal(t, state.Message, storedState.Message)
 
 	mockClient.AssertExpectations(t)
+	mockAlarmService.AssertExpectations(t)
 }
 
 func TestServiceMonitor_CreateServiceAlarm(t *testing.T) {
-	mockClient := new(MockCloudWatchClient)
-	monitor := NewServiceMonitor(mockClient, "TestNamespace", time.Minute)
+	mockClient := &MockCloudWatchClient{}
+	mockAlarmService := &MockAlarmService{}
+	monitor := NewServiceMonitor(mockClient, mockAlarmService, "TestNamespace", time.Minute)
 
-	// Expect PutMetricAlarm call
-	mockClient.On("PutMetricAlarm", mock.Anything, mock.MatchedBy(func(input *cloudwatch.PutMetricAlarmInput) bool {
-		return *input.AlarmName == "TestAlarm" && *input.Namespace == "TestNamespace"
-	})).Return(&cloudwatch.PutMetricAlarmOutput{}, nil)
+	// Expect IsAlarmsEnabled check
+	mockAlarmService.On("IsAlarmsEnabled").Return(true)
 
-	err := monitor.CreateServiceAlarm(context.Background(), "TestService", "TestAlarm", 0.5, types.ComparisonOperatorLessThanThreshold)
+	// Expect CreateAlarm call
+	mockAlarmService.On("CreateAlarm", mock.Anything, mock.MatchedBy(func(alarm Alarm) bool {
+		return alarm.Name == "TestAlarm" && alarm.Namespace == "TestNamespace"
+	})).Return(nil)
+
+	err := monitor.CreateServiceAlarm(context.Background(), "TestService", "TestAlarm", 0.5, LessThanThreshold)
 	assert.NoError(t, err)
 
-	mockClient.AssertExpectations(t)
+	mockAlarmService.AssertExpectations(t)
 }
 
 func TestServiceMonitor_GetStatusValue(t *testing.T) {
-	monitor := NewServiceMonitor(nil, "TestNamespace", time.Minute)
+	mockClient := &MockCloudWatchClient{}
+	mockAlarmService := &MockAlarmService{}
+	monitor := NewServiceMonitor(mockClient, mockAlarmService, "TestNamespace", time.Minute)
 
 	tests := []struct {
 		status string
@@ -95,8 +135,9 @@ func TestServiceMonitor_GetStatusValue(t *testing.T) {
 }
 
 func TestServiceMonitor_CheckAndUpdateStates(t *testing.T) {
-	mockClient := new(MockCloudWatchClient)
-	monitor := NewServiceMonitor(mockClient, "TestNamespace", time.Minute)
+	mockClient := &MockCloudWatchClient{}
+	mockAlarmService := &MockAlarmService{}
+	monitor := NewServiceMonitor(mockClient, mockAlarmService, "TestNamespace", time.Minute)
 
 	// Add a stale state
 	staleState := &ServiceState{
@@ -106,12 +147,15 @@ func TestServiceMonitor_CheckAndUpdateStates(t *testing.T) {
 	}
 	monitor.states["StaleService"] = staleState
 
-	// Expect PutMetricAlarm call for stale service
-	mockClient.On("PutMetricAlarm", mock.Anything, mock.MatchedBy(func(input *cloudwatch.PutMetricAlarmInput) bool {
-		return *input.AlarmName == "StaleService-StaleState"
-	})).Return(&cloudwatch.PutMetricAlarmOutput{}, nil)
+	// Expect IsAlarmsEnabled check first
+	mockAlarmService.On("IsAlarmsEnabled").Return(true)
+
+	// Expect CreateAlarm call for stale service
+	mockAlarmService.On("CreateAlarm", mock.Anything, mock.MatchedBy(func(alarm Alarm) bool {
+		return alarm.Name == "StaleService-StaleState"
+	})).Return(nil)
 
 	monitor.checkAndUpdateStates(context.Background())
 
-	mockClient.AssertExpectations(t)
+	mockAlarmService.AssertExpectations(t)
 } 

@@ -3,9 +3,16 @@ package monitoring
 import (
 	"context"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 )
 
-// AlarmService defines the interface for alarm providers
+// CloudWatchClient is an interface that wraps the required CloudWatch operations
+type CloudWatchClient interface {
+	PutMetricData(ctx context.Context, params *cloudwatch.PutMetricDataInput, optFns ...func(*cloudwatch.Options)) (*cloudwatch.PutMetricDataOutput, error)
+}
+
+// AlarmService defines the interface for alarm management
 type AlarmService interface {
 	// CreateAlarm creates a new alarm
 	CreateAlarm(ctx context.Context, alarm Alarm) error
@@ -18,25 +25,27 @@ type AlarmService interface {
 
 	// GetAlarmState gets the current state of an alarm
 	GetAlarmState(ctx context.Context, alarmName string) (AlarmState, error)
+
+	IsAlarmsEnabled() bool
 }
 
-// AlarmState represents the current state of an alarm
+// AlarmState represents the state of an alarm
 type AlarmState string
 
 const (
 	AlarmStateOK       AlarmState = "OK"
-	AlarmStateAlert    AlarmState = "ALERT"
-	AlarmStateUnknown  AlarmState = "UNKNOWN"
+	AlarmStateALARM   AlarmState = "ALARM"
+	AlarmStateUnknown AlarmState = "UNKNOWN"
 )
 
-// ComparisonOperator defines how to compare metric values
+// ComparisonOperator represents the comparison operator for an alarm
 type ComparisonOperator string
 
 const (
-	GreaterThanThreshold          ComparisonOperator = "GreaterThanThreshold"
+	GreaterThanThreshold      ComparisonOperator = "GreaterThanThreshold"
 	GreaterThanOrEqualToThreshold ComparisonOperator = "GreaterThanOrEqualToThreshold"
-	LessThanThreshold            ComparisonOperator = "LessThanThreshold"
-	LessThanOrEqualToThreshold   ComparisonOperator = "LessThanOrEqualToThreshold"
+	LessThanThreshold        ComparisonOperator = "LessThanThreshold"
+	LessThanOrEqualToThreshold ComparisonOperator = "LessThanOrEqualToThreshold"
 )
 
 // Alarm represents an alarm configuration

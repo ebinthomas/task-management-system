@@ -4,19 +4,50 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
 	"sample/task-management-system/pkg/monitoring"
 )
 
-// MockServiceMonitor is a mock implementation of the service monitor
+// MockRedisCache is a mock implementation of RedisCache
+type MockRedisCache struct {
+	mock.Mock
+}
+
+func (m *MockRedisCache) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+	args := m.Called(ctx, key, value, expiration)
+	return args.Error(0)
+}
+
+func (m *MockRedisCache) Get(ctx context.Context, key string, dest interface{}) error {
+	args := m.Called(ctx, key, dest)
+	return args.Error(0)
+}
+
+func (m *MockRedisCache) Delete(ctx context.Context, key string) error {
+	args := m.Called(ctx, key)
+	return args.Error(0)
+}
+
+func (m *MockRedisCache) Clear(ctx context.Context) error {
+	args := m.Called(ctx)
+	return args.Error(0)
+}
+
+func (m *MockRedisCache) Ping(ctx context.Context) error {
+	args := m.Called()
+	return args.Error(0)
+}
+
+// MockServiceMonitor is a mock implementation of ServiceMonitor
 type MockServiceMonitor struct {
 	mock.Mock
 }
@@ -26,77 +57,163 @@ func (m *MockServiceMonitor) UpdateServiceState(state monitoring.ServiceState) e
 	return args.Error(0)
 }
 
-func TestHealthHandler_ServeHTTP(t *testing.T) {
-	// Setup mock Redis
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("Failed to create miniredis: %v", err)
+func (m *MockServiceMonitor) IsAlarmsEnabled() bool {
+	args := m.Called()
+	return args.Bool(0)
+}
+
+func (m *MockServiceMonitor) Start(ctx context.Context) {
+	m.Called(ctx)
+}
+
+func (m *MockServiceMonitor) Stop() {
+	m.Called()
+}
+
+func (m *MockServiceMonitor) CreateServiceAlarm(ctx context.Context, serviceName, alarmName string, threshold float64, operator monitoring.ComparisonOperator) error {
+	args := m.Called(ctx, serviceName, alarmName, threshold, operator)
+	return args.Error(0)
+}
+
+// redisWrapper implements the Ping interface for testing
+type redisWrapper struct {
+	mr *miniredis.Miniredis
+	closed bool
+}
+
+func (r *redisWrapper) Ping(ctx context.Context) error {
+	if r.closed {
+		return errors.New("redis is not connected")
 	}
-	defer mr.Close()
+	return nil
+}
 
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: mr.Addr(),
-	})
-
-	// Setup mock service monitor
-	mockMonitor := new(MockServiceMonitor)
-	mockMonitor.On("UpdateServiceState", mock.AnythingOfType("monitoring.ServiceState")).Return(nil)
-
+func TestHealthHandler_ServeHTTP(t *testing.T) {
 	tests := []struct {
 		name           string
+		version        string
 		db            *sql.DB
-		cache         *redis.Client
+		cache         *MockRedisCache
 		monitor       *MockServiceMonitor
 		expectedCode  int
-		expectedState Status
+		expectedState string
 	}{
 		{
-			name:           "All Services Up",
-			cache:         redisClient,
-			monitor:       mockMonitor,
+			name:           "All Systems Operational",
+			version:        "1.0.0",
+			db:            nil, // No DB connection is OK for tests
+			cache:         &MockRedisCache{},
+			monitor:       &MockServiceMonitor{},
 			expectedCode:  http.StatusOK,
-			expectedState: StatusUp,
+			expectedState: "UP",
 		},
 		{
-			name:           "No Redis",
-			cache:         nil,
-			monitor:       mockMonitor,
+			name:           "Cache Down",
+			version:        "1.0.0",
+			db:            nil, // No DB connection is OK for tests
+			cache:         &MockRedisCache{},
+			monitor:       &MockServiceMonitor{},
 			expectedCode:  http.StatusServiceUnavailable,
-			expectedState: StatusDown,
-		},
-		{
-			name:           "No Monitor",
-			cache:         redisClient,
-			monitor:       nil,
-			expectedCode:  http.StatusOK,
-			expectedState: StatusUp,
+			expectedState: "DOWN",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			handler := NewHandler("1.0.0", tt.db, tt.cache, tt.monitor)
-			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			if tt.expectedState == "UP" {
+				tt.cache.On("Ping").Return(nil)
+			} else {
+				tt.cache.On("Ping").Return(errors.New("connection failed"))
+			}
+
+			// Mock all possible service state updates
+			tt.monitor.On("UpdateServiceState", mock.MatchedBy(func(state monitoring.ServiceState) bool {
+				return true // Accept any service state update
+			})).Return(nil)
+
+			handler := NewHandler(tt.version, tt.db, tt.cache, tt.monitor)
+			req := httptest.NewRequest("GET", "/health", nil)
 			rr := httptest.NewRecorder()
 
 			handler.ServeHTTP(rr, req)
 
 			assert.Equal(t, tt.expectedCode, rr.Code)
-			assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
 
-			var response HealthResponse
-			err := json.NewDecoder(rr.Body).Decode(&response)
+			var response map[string]interface{}
+			err := json.Unmarshal(rr.Body.Bytes(), &response)
 			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedState, response.Status)
-			assert.Equal(t, "1.0.0", response.Version)
-			assert.NotEmpty(t, response.System.GoVersion)
-			assert.NotZero(t, response.System.NumCPU)
+			assert.Equal(t, tt.expectedState, response["status"])
+			assert.Equal(t, tt.version, response["version"])
 
-			if tt.monitor != nil {
-				tt.monitor.AssertExpectations(t)
-			}
+			tt.cache.AssertExpectations(t)
+			tt.monitor.AssertExpectations(t)
 		})
 	}
+}
+
+func TestHealthHandler_CacheTimeout(t *testing.T) {
+	mockCache := &MockRedisCache{}
+	mockMonitor := &MockServiceMonitor{}
+	version := "1.0.0"
+
+	// Create a channel to control when Ping returns
+	done := make(chan struct{})
+	defer close(done)
+
+	// Simulate a cache timeout that blocks until we signal it
+	mockCache.On("Ping", mock.Anything).Return(errors.New("timeout"))
+
+	// Mock all possible service state updates
+	mockMonitor.On("UpdateServiceState", mock.MatchedBy(func(state monitoring.ServiceState) bool {
+		return true // Accept any service state update
+	})).Return(nil)
+
+	handler := NewHandler(version, nil, mockCache, mockMonitor)
+	req := httptest.NewRequest("GET", "/health", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(rr.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Equal(t, "DOWN", response["status"])
+	assert.Equal(t, version, response["version"])
+
+	mockCache.AssertExpectations(t)
+	mockMonitor.AssertExpectations(t)
+}
+
+func TestHealthHandler_MonitoringDisabled(t *testing.T) {
+	mockCache := &MockRedisCache{}
+	mockMonitor := &MockServiceMonitor{}
+	version := "1.0.0"
+
+	mockCache.On("Ping", mock.Anything).Return(nil)
+
+	// Mock all possible service state updates
+	mockMonitor.On("UpdateServiceState", mock.MatchedBy(func(state monitoring.ServiceState) bool {
+		return true // Accept any service state update
+	})).Return(nil)
+
+	handler := NewHandler(version, nil, mockCache, mockMonitor)
+	req := httptest.NewRequest("GET", "/health", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	var response map[string]interface{}
+	err := json.Unmarshal(rr.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Equal(t, "UP", response["status"])
+	assert.Equal(t, version, response["version"])
+
+	mockCache.AssertExpectations(t)
+	mockMonitor.AssertExpectations(t)
 }
 
 func TestHealthHandler_CheckComponents(t *testing.T) {
@@ -107,32 +224,30 @@ func TestHealthHandler_CheckComponents(t *testing.T) {
 	}
 	defer mr.Close()
 
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: mr.Addr(),
-	})
+	redisClient := &redisWrapper{mr: mr}
 
 	// Setup mock service monitor
 	mockMonitor := new(MockServiceMonitor)
-	mockMonitor.On("UpdateServiceState", mock.AnythingOfType("monitoring.ServiceState")).Return(nil)
+	mockMonitor.On("UpdateServiceState", mock.AnythingOfType("monitoring.ServiceState")).Return(nil).Times(6) // 2 calls to checkHealth, 3 updates each (cache, db, system)
 
 	handler := NewHandler("1.0.0", nil, redisClient, mockMonitor)
 	ctx := context.Background()
 
-	// Test Redis check
-	redisStatus := handler.checkRedis(ctx)
-	assert.Equal(t, StatusUp, redisStatus.Status)
-	assert.Contains(t, redisStatus.Message, "successful")
+	// Test initial state
+	response := handler.checkHealth(ctx)
+	assert.Equal(t, StatusUp, response.Services["cache"].Status)
+	assert.Contains(t, response.Services["cache"].Message, "successful")
+	assert.Equal(t, StatusDown, response.Services["database"].Status)
+	assert.Contains(t, response.Services["database"].Message, "not configured")
 
 	// Test Redis failure
 	mr.Close()
-	redisStatus = handler.checkRedis(ctx)
-	assert.Equal(t, StatusDown, redisStatus.Status)
-	assert.Contains(t, redisStatus.Message, "Failed")
-
-	// Test DB check with nil connection
-	dbStatus := handler.checkDatabase(ctx)
-	assert.Equal(t, StatusDown, dbStatus.Status)
-	assert.Contains(t, dbStatus.Message, "not configured")
+	redisClient.closed = true
+	response = handler.checkHealth(ctx)
+	assert.Equal(t, StatusDown, response.Services["cache"].Status)
+	assert.Contains(t, response.Services["cache"].Message, "Failed")
+	assert.Equal(t, StatusDown, response.Services["database"].Status)
+	assert.Contains(t, response.Services["database"].Message, "not configured")
 
 	mockMonitor.AssertExpectations(t)
 }

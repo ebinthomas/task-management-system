@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"time"
 
-	"sample/task-management-system/pkg/cache"
 	"sample/task-management-system/pkg/monitoring"
 )
 
@@ -45,19 +44,23 @@ type SystemInfo struct {
 
 // Handler handles health check requests
 type Handler struct {
-	version        string
-	db            *sql.DB
-	cache         *cache.RedisCache
-	serviceMonitor *monitoring.ServiceMonitor
+	version  string
+	db       *sql.DB
+	cache    interface {
+		Ping(ctx context.Context) error
+	}
+	monitor  interface {
+		UpdateServiceState(state monitoring.ServiceState) error
+	}
 }
 
 // NewHandler creates a new health check handler
-func NewHandler(version string, db *sql.DB, cache *cache.RedisCache, monitor *monitoring.ServiceMonitor) *Handler {
+func NewHandler(version string, db *sql.DB, cache interface{ Ping(ctx context.Context) error }, monitor interface{ UpdateServiceState(state monitoring.ServiceState) error }) *Handler {
 	return &Handler{
-		version:        version,
-		db:            db,
-		cache:         cache,
-		serviceMonitor: monitor,
+		version:  version,
+		db:       db,
+		cache:    cache,
+		monitor:  monitor,
 	}
 }
 
@@ -79,16 +82,16 @@ func (h *Handler) checkHealth(ctx context.Context) HealthResponse {
 	services := make(map[string]Component)
 	overallStatus := StatusUp
 
-	// Check database
+	// Check database if configured
 	dbComponent := h.checkDatabase(ctx)
 	services["database"] = dbComponent
-	if dbComponent.Status == StatusDown {
+	if h.db != nil && dbComponent.Status == StatusDown {
 		overallStatus = StatusDown
 	}
 
 	// Update database state in service monitor
-	if h.serviceMonitor != nil {
-		h.serviceMonitor.UpdateServiceState(monitoring.ServiceState{
+	if h.monitor != nil {
+		h.monitor.UpdateServiceState(monitoring.ServiceState{
 			Name:      "database",
 			Status:    string(dbComponent.Status),
 			Message:   dbComponent.Message,
@@ -106,8 +109,8 @@ func (h *Handler) checkHealth(ctx context.Context) HealthResponse {
 		}
 
 		// Update cache state in service monitor
-		if h.serviceMonitor != nil {
-			h.serviceMonitor.UpdateServiceState(monitoring.ServiceState{
+		if h.monitor != nil {
+			h.monitor.UpdateServiceState(monitoring.ServiceState{
 				Name:      "cache",
 				Status:    string(cacheComponent.Status),
 				Message:   cacheComponent.Message,
@@ -128,8 +131,8 @@ func (h *Handler) checkHealth(ctx context.Context) HealthResponse {
 	}
 
 	// Update system metrics in service monitor
-	if h.serviceMonitor != nil {
-		h.serviceMonitor.UpdateServiceState(monitoring.ServiceState{
+	if h.monitor != nil {
+		h.monitor.UpdateServiceState(monitoring.ServiceState{
 			Name:      "system",
 			Status:    string(overallStatus),
 			Message:   "System metrics updated",

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -21,33 +22,32 @@ type ServiceState struct {
 	Metrics    map[string]float64
 }
 
-// ServiceMonitor handles monitoring of service states and alarm management
+// ServiceMonitor monitors service health and metrics
 type ServiceMonitor struct {
-	client        *cloudwatch.Client
-	alarmService  AlarmService
-	namespace     string
-	checkInterval time.Duration
-	states        map[string]*ServiceState
-	alarmsEnabled bool
-	stopCh        chan struct{}
+	client      CloudWatchClient
+	alarmSvc    AlarmService
+	namespace   string
+	states      map[string]*ServiceState
+	statesMutex sync.RWMutex
+	interval    time.Duration
+	stopCh      chan struct{}
 }
 
-// NewServiceMonitor creates a new service monitor instance
-func NewServiceMonitor(client *cloudwatch.Client, alarmService AlarmService, namespace string, interval time.Duration) *ServiceMonitor {
+// NewServiceMonitor creates a new service monitor
+func NewServiceMonitor(client CloudWatchClient, alarmSvc AlarmService, namespace string, interval time.Duration) *ServiceMonitor {
 	return &ServiceMonitor{
-		client:        client,
-		alarmService:  alarmService,
-		namespace:     namespace,
-		checkInterval: interval,
-		states:        make(map[string]*ServiceState),
-		alarmsEnabled: os.Getenv("ENABLE_ALARMS") == "true",
-		stopCh:        make(chan struct{}),
+		client:    client,
+		alarmSvc:  alarmSvc,
+		namespace: namespace,
+		states:    make(map[string]*ServiceState),
+		interval:  interval,
+		stopCh:    make(chan struct{}),
 	}
 }
 
 // Start begins monitoring service states
 func (sm *ServiceMonitor) Start(ctx context.Context) {
-	ticker := time.NewTicker(sm.checkInterval)
+	ticker := time.NewTicker(sm.interval)
 	defer ticker.Stop()
 
 	for {
@@ -75,6 +75,9 @@ func (sm *ServiceMonitor) UpdateServiceState(state ServiceState) error {
 	if state.Timestamp.IsZero() {
 		state.Timestamp = time.Now()
 	}
+
+	sm.statesMutex.Lock()
+	defer sm.statesMutex.Unlock()
 
 	sm.states[state.Name] = &state
 
@@ -142,12 +145,15 @@ func (sm *ServiceMonitor) UpdateServiceState(state ServiceState) error {
 
 // checkAndUpdateStates periodically checks service states and updates alarms
 func (sm *ServiceMonitor) checkAndUpdateStates(ctx context.Context) {
-	if !sm.alarmsEnabled {
+	if !sm.alarmSvc.IsAlarmsEnabled() {
 		return // Skip alarm checks if alarms are disabled
 	}
 
+	sm.statesMutex.RLock()
+	defer sm.statesMutex.RUnlock()
+
 	for name, state := range sm.states {
-		if time.Since(state.Timestamp) > sm.checkInterval*2 {
+		if time.Since(state.Timestamp) > sm.interval*2 {
 			log.Printf("Warning: Service %s state is stale", name)
 			
 			// Create alarm for stale service state
@@ -165,7 +171,7 @@ func (sm *ServiceMonitor) checkAndUpdateStates(ctx context.Context) {
 				},
 			}
 
-			err := sm.alarmService.CreateAlarm(ctx, alarm)
+			err := sm.alarmSvc.CreateAlarm(ctx, alarm)
 			if err != nil {
 				log.Printf("Failed to create/update alarm for service %s: %v", name, err)
 			}
@@ -189,7 +195,7 @@ func (sm *ServiceMonitor) getStatusValue(status string) float64 {
 
 // CreateServiceAlarm creates an alarm for a service
 func (sm *ServiceMonitor) CreateServiceAlarm(ctx context.Context, serviceName, alarmName string, threshold float64, operator ComparisonOperator) error {
-	if !sm.alarmsEnabled {
+	if !sm.alarmSvc.IsAlarmsEnabled() {
 		log.Printf("Alarms are disabled, skipping alarm creation for %s", serviceName)
 		return nil
 	}
@@ -208,10 +214,10 @@ func (sm *ServiceMonitor) CreateServiceAlarm(ctx context.Context, serviceName, a
 		},
 	}
 
-	return sm.alarmService.CreateAlarm(ctx, alarm)
+	return sm.alarmSvc.CreateAlarm(ctx, alarm)
 }
 
 // IsAlarmsEnabled returns whether alarms are enabled
 func (sm *ServiceMonitor) IsAlarmsEnabled() bool {
-	return sm.alarmsEnabled
+	return sm.alarmSvc.IsAlarmsEnabled()
 } 

@@ -76,5 +76,10 @@ func (s *taskService) ListTasks(ctx context.Context, status models.TaskStatus, p
 		Limit:  limit,
 	}
 
-	return s.repo.List(ctx, filter)
+	tasks, total, err := s.repo.List(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return tasks, total, nil
 } 
