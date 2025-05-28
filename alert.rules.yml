@@ -1,0 +1,47 @@
+groups:
+  - name: task_management_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > ${HIGH_ERROR_RATE_THRESHOLD}
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: High error rate detected
+          description: "Error rate is {{ $value }} for the last 5 minutes"
+
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > ${HIGH_LATENCY_THRESHOLD}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High latency detected
+          description: "95th percentile latency is {{ $value }}s for the last 5 minutes"
+
+      - alert: HighTaskCreationRate
+        expr: rate(tasks_created_total[5m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High task creation rate
+          description: "Task creation rate is {{ $value }} per second"
+
+      - alert: CacheFailureRate
+        expr: rate(cache_operations_total{result="Failure"}[5m]) / rate(cache_operations_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High cache failure rate
+          description: "Cache failure rate is {{ $value }}% in the last 5 minutes"
+
+      - alert: DatabaseConnectionIssues
+        expr: database_connection_errors_total > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Database connection issues detected
+          description: "{{ $value }} database connection errors detected" 
