@@ -249,27 +249,26 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/tasks
 
 
 
-#Additional Featues:
 
-- Health checks
-- Unit tests
+
+# Additional Featues:
 
 1. ## PostgreSQL database for persistent storage
 
-#### Database Configuration
+### Database Configuration
 - `DB_HOST`: PostgreSQL host (default: "localhost")
 - `DB_PORT`: PostgreSQL port (default: "5432")
 - `DB_USER`: Database username (default: "postgres")
 - `DB_PASSWORD`: Database password (default: "postgres")
 - `DB_NAME`: Database name (default: "taskdb")
 
-2.##JWT Basesd Authentication
+2. ## JWT Basesd Authentication
     ### Config
     - `AUTH_SECRET`: JWT signing secret (required)
     - `AUTH_ISSUER`: JWT issuer (required)
 
 
-3.## Role-Based Access Control
+3. ## Role-Based Access Control
     a. **Admin Role**:
     - Full access to all endpoints
     - Can perform all CRUD operations
