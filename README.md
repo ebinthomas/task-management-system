@@ -189,6 +189,11 @@ Response:
 # Using docker-compose
 docker-compose up -d --build
 ```
+Or
+```bash
+# Using docker-compose
+docker compose up -d --build
+```
 
 <!-- 2. ### Running the Service
 
